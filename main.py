@@ -215,7 +215,12 @@ async def process_financial_document(
         # -------------------------------------------------
         # PARSE JSON
         # -------------------------------------------------
-        parsed_json = json.loads(ai_response)
+        cleaned_response = ai_response.strip()
+
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response.replace("```json", "").replace("```", "").strip()
+
+        parsed_json = json.loads(cleaned_response)
 
         # -------------------------------------------------
         # VALIDATE USING PYDANTIC
