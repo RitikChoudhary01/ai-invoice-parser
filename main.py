@@ -3,7 +3,7 @@ import io
 import json
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel, Field
-from openai import OpenAI
+import google.generativeai as genai
 from dotenv import load_dotenv
 import pypdf
 
@@ -12,15 +12,35 @@ import pypdf
 # =========================================================
 load_dotenv()
 
+
+def _normalize_model_name(model_name: str) -> str:
+    if model_name.startswith("google/"):
+        return model_name.split("/", 1)[1]
+    return model_name
+
+
+def _build_gemini_model() -> genai.GenerativeModel:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    return genai.GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=SYSTEM_PROMPT,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0
+        )
+    )
+
 # =========================================================
 # TUNABLES FOR LATENCY
 # =========================================================
-MODEL_NAME = os.getenv(
-        "INVOICE_MODEL",
-        "deepseek/deepseek-v4-flash:free"
+RAW_MODEL_NAME = os.getenv(
+    "INVOICE_MODEL",
+    "google/gemini-2.5-flash"
 )
+MODEL_NAME = _normalize_model_name(RAW_MODEL_NAME)
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "0"))
 MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "0"))
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 SYSTEM_PROMPT = """
 You are an expert accounting AI.
@@ -58,24 +78,11 @@ Rules:
 # =========================================================
 app = FastAPI(
     title="AI Financial Reconciliation API",
-    description="DeepSeek-powered invoice extraction engine",
+    description="Gemini-powered invoice extraction engine",
     version="2.0.0"
 )
 
-# =========================================================
-# OPENROUTER CLIENT
-# =========================================================
-client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1",
-    default_headers={
-        "HTTP-Referer": os.getenv(
-            "OPENROUTER_HTTP_REFERER",
-            "http://localhost:8000"
-        ),
-        "X-Title": "AI Financial Reconciliation API",
-    },
-)
+genai_model: genai.GenerativeModel | None = None
 
 # =========================================================
 # PYDANTIC MODELS
@@ -104,8 +111,19 @@ class InvoiceData(BaseModel):
 @app.get("/")
 def root():
     return {
-        "message": "DeepSeek Invoice Engine Running"
+        "message": "Gemini Invoice Engine Running"
     }
+
+
+@app.on_event("startup")
+def startup_check():
+    global genai_model
+
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY is not set.")
+
+    genai_model = _build_gemini_model()
+    print("Gemini client initialized.")
 
 
 # =========================================================
@@ -115,7 +133,7 @@ def root():
 def health_check():
     return {
         "status": "active",
-        "model": MODEL_NAME
+        "model": RAW_MODEL_NAME
     }
 
 
@@ -179,30 +197,20 @@ async def process_financial_document(
             )
 
         # -------------------------------------------------
-        # AI CALL (DEEPSEEK)
+        # AI CALL (GEMINI)
         # -------------------------------------------------
-        completion = client.chat.completions.create(
-                        model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                                        "content": SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": raw_text
-                }
-            ],
-            response_format={
-                "type": "json_object"
-            },
-            temperature=0
-        )
+        if genai_model is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Gemini client is not initialized."
+            )
+
+        response = genai_model.generate_content(raw_text)
 
         # -------------------------------------------------
         # GET AI RESPONSE
         # -------------------------------------------------
-        ai_response = completion.choices[0].message.content
+        ai_response = response.text
 
         # -------------------------------------------------
         # PARSE JSON
